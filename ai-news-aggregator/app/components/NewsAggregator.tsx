@@ -7,11 +7,11 @@ import SkeletonCard from './SkeletonCard';
 
 const SUBREDDITS: { value: SubredditFilter; label: string; color: string }[] = [
   { value: 'all', label: 'All', color: '#6366f1' },
-  { value: 'ai', label: 'AI', color: '#f59e0b' },
-  { value: 'chatgpt', label: 'ChatGPT', color: '#10b981' },
-  { value: 'localai', label: 'Local AI', color: '#3b82f6' },
-  { value: 'singularity', label: 'Singularity', color: '#ec4899' },
-  { value: 'openai', label: 'OpenAI', color: '#6366f1' },
+  { value: 'artificial', label: 'r/artificial', color: '#f59e0b' },
+  { value: 'ChatGPT', label: 'r/ChatGPT', color: '#10b981' },
+  { value: 'LocalLLaMA', label: 'r/LocalLLaMA', color: '#3b82f6' },
+  { value: 'singularity', label: 'r/singularity', color: '#ec4899' },
+  { value: 'OpenAI', label: 'r/OpenAI', color: '#6366f1' },
 ];
 
 const SORT_OPTIONS: { value: SortType; label: string; icon: string }[] = [
@@ -139,7 +139,7 @@ export default function NewsAggregator() {
                   AI News
                 </h1>
                   <p className="text-xs text-[#94a3b8] leading-none mt-0.5 hidden sm:block">
-                  Top AI stories from Hacker News
+                  What AI community talks about today
                 </p>
               </div>
             </div>
@@ -297,11 +297,11 @@ export default function NewsAggregator() {
           <div className="mb-5 flex items-center justify-between">
             <p className="text-sm text-[#94a3b8]">
               <span className="font-semibold text-[#e2e8f0]">{posts.length}</span>{' '}
-              stories from{' '}
+              posts from{' '}
               <span className="font-semibold text-[#e2e8f0]">
                 {selectedSubreddit === 'all'
-                ? '5 categories'
-                : SUBREDDITS.find((s) => s.value === selectedSubreddit)?.label ?? selectedSubreddit}
+                ? '5 subreddits'
+                : `r/${selectedSubreddit}`}
               </span>
             </p>
             <div className="flex items-center gap-2 text-xs text-[#4a5568]">
@@ -357,7 +357,7 @@ export default function NewsAggregator() {
             <div>
               <p className="text-[#e2e8f0] font-semibold text-lg">No posts found</p>
               <p className="text-[#94a3b8] text-sm mt-1">
-                Try a different category or sort option
+                Try a different subreddit or sort option
               </p>
             </div>
             <button
@@ -373,7 +373,7 @@ export default function NewsAggregator() {
       {/* Footer */}
       <footer className="border-t border-[#1e1e2e] mt-12 py-6 text-center">
         <p className="text-xs text-[#4a5568]">
-          Data from Hacker News via Algolia API · Not affiliated with Y Combinator ·{' '}
+          Data from Reddit via PullPush API · Not affiliated with Reddit ·{' '}
           <span className="gradient-text font-semibold">AI News Aggregator</span>
         </p>
       </footer>

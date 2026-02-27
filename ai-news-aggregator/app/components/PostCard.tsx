@@ -3,20 +3,12 @@
 import Image from 'next/image';
 import { RedditPost } from '@/app/types/reddit';
 
-const CATEGORY_COLORS: Record<string, { bg: string; text: string; border: string }> = {
-  ai: { bg: 'rgba(245,158,11,0.15)', text: '#f59e0b', border: 'rgba(245,158,11,0.3)' },
-  chatgpt: { bg: 'rgba(16,185,129,0.15)', text: '#10b981', border: 'rgba(16,185,129,0.3)' },
-  localai: { bg: 'rgba(59,130,246,0.15)', text: '#3b82f6', border: 'rgba(59,130,246,0.3)' },
+const SUBREDDIT_COLORS: Record<string, { bg: string; text: string; border: string }> = {
+  artificial: { bg: 'rgba(245,158,11,0.15)', text: '#f59e0b', border: 'rgba(245,158,11,0.3)' },
+  ChatGPT: { bg: 'rgba(16,185,129,0.15)', text: '#10b981', border: 'rgba(16,185,129,0.3)' },
+  LocalLLaMA: { bg: 'rgba(59,130,246,0.15)', text: '#3b82f6', border: 'rgba(59,130,246,0.3)' },
   singularity: { bg: 'rgba(236,72,153,0.15)', text: '#ec4899', border: 'rgba(236,72,153,0.3)' },
-  openai: { bg: 'rgba(99,102,241,0.15)', text: '#6366f1', border: 'rgba(99,102,241,0.3)' },
-};
-
-const CATEGORY_LABELS: Record<string, string> = {
-  ai: 'AI',
-  chatgpt: 'ChatGPT',
-  localai: 'Local AI',
-  singularity: 'Singularity',
-  openai: 'OpenAI',
+  OpenAI: { bg: 'rgba(99,102,241,0.15)', text: '#6366f1', border: 'rgba(99,102,241,0.3)' },
 };
 
 function formatScore(score: number): string {
@@ -47,15 +39,13 @@ interface PostCardProps {
 }
 
 export default function PostCard({ post, index }: PostCardProps) {
-  const colors = CATEGORY_COLORS[post.subreddit] ?? {
+  const colors = SUBREDDIT_COLORS[post.subreddit] ?? {
     bg: 'rgba(99,102,241,0.15)',
     text: '#6366f1',
     border: 'rgba(99,102,241,0.3)',
   };
 
-  const categoryLabel = CATEGORY_LABELS[post.subreddit] ?? post.subreddit;
-
-  const isTrending = post.score > 200;
+  const isTrending = post.score > 5000;
 
   return (
     <article
@@ -95,7 +85,7 @@ export default function PostCard({ post, index }: PostCardProps) {
       <div className="flex flex-col flex-1 p-4 gap-3">
         {/* Badges row */}
         <div className="flex flex-wrap items-center gap-2">
-          {/* Category badge */}
+          {/* Subreddit badge */}
           <span
             className="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold border"
             style={{
@@ -104,7 +94,7 @@ export default function PostCard({ post, index }: PostCardProps) {
               borderColor: colors.border,
             }}
           >
-            {categoryLabel}
+            r/{post.subreddit}
           </span>
 
           {/* Flair badge */}
@@ -163,7 +153,7 @@ export default function PostCard({ post, index }: PostCardProps) {
           <div className="flex flex-col items-end gap-0.5">
             {/* Author */}
             <span className="text-xs text-[#6366f1] font-medium truncate max-w-[100px]">
-              {post.author}
+              u/{post.author}
             </span>
             {/* Time */}
             <span className="text-xs text-[#4a5568]">{timeAgo(post.createdAt)}</span>

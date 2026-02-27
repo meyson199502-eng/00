@@ -1,81 +1,102 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { RedditPost } from '@/app/types/reddit';
 
-// ── Hacker News topic configuration ──────────────────────────────────────────
-// We map the legacy "subreddit" concept to HN search queries / tags.
-// The "source" field in RedditPost is set to the category key.
+const SUBREDDITS = ['artificial', 'ChatGPT', 'LocalLLaMA', 'singularity', 'OpenAI'] as const;
 
-const CATEGORIES = {
-  ai: { label: 'AI', query: 'artificial intelligence OR machine learning OR LLM OR GPT OR Claude' },
-  chatgpt: { label: 'ChatGPT', query: 'ChatGPT OR GPT-4 OR OpenAI chat' },
-  localai: { label: 'Local AI', query: 'local LLM OR llama OR mistral OR ollama OR open-source LLM' },
-  singularity: { label: 'Singularity', query: 'AGI OR singularity OR superintelligence' },
-  openai: { label: 'OpenAI', query: 'OpenAI OR GPT OR DALL-E OR Sora' },
-} as const;
+// PullPush.io — open Reddit archive API, no auth required.
+// Docs: https://pullpush.io/
+const PULLPUSH_BASE = 'https://api.pullpush.io/reddit/search/submission/';
 
-type CategoryKey = keyof typeof CATEGORIES;
-const CATEGORY_KEYS = Object.keys(CATEGORIES) as CategoryKey[];
+// ── Types ─────────────────────────────────────────────────────────────────────
 
-// ── Algolia HN API types ──────────────────────────────────────────────────────
-
-interface HNHit {
-  objectID: string;
+interface PullPushSubmission {
+  id: string;
   title: string;
-  url?: string;
-  story_text?: string;
-  author: string;
-  points: number;
+  url: string;
+  permalink: string;
+  subreddit: string;
+  score: number;
   num_comments: number;
-  created_at_i: number; // unix seconds
-  _tags: string[];
+  author: string;
+  thumbnail?: string;
+  selftext?: string;
+  created_utc: number;
+  link_flair_text?: string | null;
+  is_reddit_media_domain?: boolean;
+  post_hint?: string;
+  preview?: {
+    images: Array<{
+      source: { url: string };
+    }>;
+  };
 }
 
-interface HNSearchResponse {
-  hits: HNHit[];
+interface PullPushResponse {
+  data: PullPushSubmission[];
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function normalizeHit(hit: HNHit, category: CategoryKey): RedditPost {
-  const storyUrl = hit.url ?? `https://news.ycombinator.com/item?id=${hit.objectID}`;
+function normalizePost(raw: PullPushSubmission): RedditPost {
+  let previewUrl: string | null = null;
+  if (raw.preview?.images?.[0]?.source?.url) {
+    previewUrl = raw.preview.images[0].source.url.replace(/&amp;/g, '&');
+  }
+
+  const invalidThumbnails = ['self', 'default', 'nsfw', 'spoiler', '', 'image'];
+  const thumbnail =
+    raw.thumbnail &&
+    !invalidThumbnails.includes(raw.thumbnail) &&
+    raw.thumbnail.startsWith('http')
+      ? raw.thumbnail
+      : null;
+
+  const isImage =
+    raw.post_hint === 'image' ||
+    !!raw.is_reddit_media_domain ||
+    /\.(jpg|jpeg|png|gif|webp)(\?.*)?$/i.test(raw.url);
 
   return {
-    id: hit.objectID,
-    title: hit.title ?? '(no title)',
-    url: storyUrl,
-    permalink: `https://news.ycombinator.com/item?id=${hit.objectID}`,
-    subreddit: category,
-    score: hit.points ?? 0,
-    numComments: hit.num_comments ?? 0,
-    author: hit.author ?? '',
-    thumbnail: null,
-    selftext: hit.story_text ? hit.story_text.replace(/<[^>]+>/g, '').slice(0, 200) : '',
-    createdAt: hit.created_at_i,
-    flair: CATEGORIES[category].label,
-    isImage: false,
-    preview: null,
+    id: raw.id,
+    title: raw.title,
+    url: raw.url,
+    permalink: `https://www.reddit.com${raw.permalink}`,
+    subreddit: raw.subreddit,
+    score: raw.score ?? 0,
+    numComments: raw.num_comments ?? 0,
+    author: raw.author ?? '',
+    thumbnail,
+    selftext: raw.selftext ? raw.selftext.replace(/\[removed\]/g, '').trim().slice(0, 200) : '',
+    createdAt: raw.created_utc,
+    flair: raw.link_flair_text ?? null,
+    isImage,
+    preview: previewUrl,
   };
 }
 
-async function fetchCategory(
-  category: CategoryKey,
+// Map sort type to PullPush sort_type parameter
+function toSortType(sort: string): string {
+  if (sort === 'new') return 'created_utc';
+  if (sort === 'top') return 'score';
+  // hot — no native equivalent, use score as proxy
+  return 'score';
+}
+
+async function fetchSubreddit(
+  subreddit: string,
   sort: string,
   limit: number
 ): Promise<RedditPost[]> {
-  const { query } = CATEGORIES[category];
-
-  // Algolia HN has two endpoints:
-  //   /search       → relevance + points (best for "hot" / "top")
-  //   /search_by_date → newest first (best for "new")
-  const endpoint = sort === 'new' ? 'search_by_date' : 'search';
-
   const params = new URLSearchParams({
-    query,
-    tags: 'story',
-    hitsPerPage: String(limit),
+    subreddit,
+    sort: 'desc',
+    sort_type: toSortType(sort),
+    size: String(limit),
+    // Restrict to posts from the last 7 days so results stay fresh
+    after: String(Math.floor(Date.now() / 1000) - 7 * 24 * 60 * 60),
   });
 
-  const url = `https://hn.algolia.com/api/v1/${endpoint}?${params}`;
+  const url = `${PULLPUSH_BASE}?${params}`;
 
   const response = await fetch(url, {
     headers: { 'User-Agent': 'AINewsAggregator/2.0' },
@@ -83,18 +104,22 @@ async function fetchCategory(
   });
 
   if (!response.ok) {
-    throw new Error(`HN Algolia fetch failed for category "${category}": ${response.status}`);
+    throw new Error(`PullPush fetch failed for r/${subreddit}: ${response.status}`);
   }
 
-  const json: HNSearchResponse = await response.json();
-  return json.hits.map((hit) => normalizeHit(hit, category));
+  const json: PullPushResponse = await response.json();
+
+  if (!Array.isArray(json.data)) {
+    throw new Error(`Unexpected PullPush response for r/${subreddit}`);
+  }
+
+  return json.data.map(normalizePost);
 }
 
 // ── Route handler ─────────────────────────────────────────────────────────────
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
-  // "subreddit" param kept for API compatibility with the client
   const subredditParam = searchParams.get('subreddit') || 'all';
   const sort = searchParams.get('sort') || 'hot';
   const limit = Math.min(parseInt(searchParams.get('limit') || '50', 10), 100);
@@ -102,29 +127,29 @@ export async function GET(request: NextRequest) {
   const validSorts = ['hot', 'new', 'top'];
   const safeSort = validSorts.includes(sort) ? sort : 'hot';
 
-  let targetCategories: CategoryKey[];
+  let targetSubreddits: string[];
 
   if (subredditParam === 'all') {
-    targetCategories = [...CATEGORY_KEYS];
+    targetSubreddits = [...SUBREDDITS];
   } else {
-    targetCategories = subredditParam
+    targetSubreddits = subredditParam
       .split(',')
       .map((s) => s.trim())
-      .filter((s): s is CategoryKey => CATEGORY_KEYS.includes(s as CategoryKey));
+      .filter((s) => SUBREDDITS.includes(s as (typeof SUBREDDITS)[number]));
 
-    if (targetCategories.length === 0) {
+    if (targetSubreddits.length === 0) {
       return NextResponse.json(
-        { error: 'Invalid category specified', posts: [] },
+        { error: 'Invalid subreddit(s) specified', posts: [] },
         { status: 400 }
       );
     }
   }
 
-  const perCategoryLimit =
-    subredditParam === 'all' ? Math.ceil(limit / targetCategories.length) : limit;
+  const perSubredditLimit =
+    subredditParam === 'all' ? Math.ceil(limit / targetSubreddits.length) : limit;
 
   const results = await Promise.allSettled(
-    targetCategories.map((cat) => fetchCategory(cat, safeSort, perCategoryLimit))
+    targetSubreddits.map((sub) => fetchSubreddit(sub, safeSort, perSubredditLimit))
   );
 
   const posts: RedditPost[] = [];
@@ -138,7 +163,7 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  // Deduplicate by id (same story can match multiple queries)
+  // Deduplicate by id
   const seen = new Set<string>();
   const dedupedPosts = posts.filter((p) => {
     if (seen.has(p.id)) return false;
@@ -157,7 +182,7 @@ export async function GET(request: NextRequest) {
     posts: dedupedPosts.slice(0, limit),
     errors: errors.length > 0 ? errors : undefined,
     meta: {
-      subreddits: targetCategories,
+      subreddits: targetSubreddits,
       sort: safeSort,
       count: dedupedPosts.length,
     },
