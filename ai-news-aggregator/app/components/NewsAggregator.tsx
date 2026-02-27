@@ -80,9 +80,10 @@ function normalizePost(raw: RawRedditPost): RedditPost {
 }
 
 async function fetchSubreddit(subreddit: string, sort: SortType): Promise<RedditPost[]> {
+  // No custom headers — keeps it a "simple request" so the browser skips the
+  // preflight OPTIONS, which Reddit blocks with 403.
   const res = await fetch(
-    `https://www.reddit.com/r/${subreddit}/${sort}.json?limit=25&t=day`,
-    { headers: { Accept: 'application/json' } }
+    `https://www.reddit.com/r/${subreddit}/${sort}.json?limit=25&t=day`
   );
   if (!res.ok) throw new Error(`r/${subreddit}: ${res.status}`);
   const json = await res.json();
@@ -437,7 +438,7 @@ export default function NewsAggregator() {
           Data from Reddit · Not affiliated with Reddit ·{' '}
           <span className="gradient-text font-semibold">AI News Aggregator</span>
           {' '}·{' '}
-          <span className="font-mono text-[#2d2d3f] bg-[#1a1a2e] px-1.5 py-0.5 rounded text-[10px]">v3.0.0</span>
+          <span className="font-mono text-[#2d2d3f] bg-[#1a1a2e] px-1.5 py-0.5 rounded text-[10px]">v3.1.0</span>
         </p>
       </footer>
     </div>
