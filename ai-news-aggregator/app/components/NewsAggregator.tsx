@@ -14,13 +14,82 @@ const SUBREDDITS: { value: SubredditFilter; label: string; color: string }[] = [
   { value: 'OpenAI', label: 'r/OpenAI', color: '#6366f1' },
 ];
 
+const SUBREDDIT_NAMES = ['artificial', 'ChatGPT', 'LocalLLaMA', 'singularity', 'OpenAI'] as const;
+
 const SORT_OPTIONS: { value: SortType; label: string; icon: string }[] = [
   { value: 'hot', label: 'Hot', icon: '🔥' },
   { value: 'new', label: 'New', icon: '✨' },
   { value: 'top', label: 'Top', icon: '🏆' },
 ];
 
-const AUTO_REFRESH_INTERVAL = 5 * 60; // 5 minutes in seconds
+const AUTO_REFRESH_INTERVAL = 5 * 60;
+
+// ── Reddit JSON fetch (runs in the user's browser — no server-side blocking) ──
+
+interface RawRedditPost {
+  data: {
+    id: string;
+    title: string;
+    url: string;
+    permalink: string;
+    subreddit: string;
+    score: number;
+    num_comments: number;
+    author: string;
+    thumbnail: string;
+    selftext: string;
+    created_utc: number;
+    link_flair_text: string | null;
+    is_reddit_media_domain: boolean;
+    post_hint?: string;
+    preview?: { images: Array<{ source: { url: string } }> };
+  };
+}
+
+function normalizePost(raw: RawRedditPost): RedditPost {
+  const d = raw.data;
+  let previewUrl: string | null = null;
+  if (d.preview?.images?.[0]?.source?.url) {
+    previewUrl = d.preview.images[0].source.url.replace(/&amp;/g, '&');
+  }
+  const invalidThumbnails = ['self', 'default', 'nsfw', 'spoiler', '', 'image'];
+  const thumbnail =
+    d.thumbnail && !invalidThumbnails.includes(d.thumbnail) && d.thumbnail.startsWith('http')
+      ? d.thumbnail
+      : null;
+  const isImage =
+    d.post_hint === 'image' ||
+    d.is_reddit_media_domain ||
+    /\.(jpg|jpeg|png|gif|webp)(\?.*)?$/i.test(d.url);
+  return {
+    id: d.id,
+    title: d.title,
+    url: d.url,
+    permalink: `https://www.reddit.com${d.permalink}`,
+    subreddit: d.subreddit,
+    score: d.score,
+    numComments: d.num_comments,
+    author: d.author,
+    thumbnail,
+    selftext: d.selftext ? d.selftext.slice(0, 200) : '',
+    createdAt: d.created_utc,
+    flair: d.link_flair_text || null,
+    isImage,
+    preview: previewUrl,
+  };
+}
+
+async function fetchSubreddit(subreddit: string, sort: SortType): Promise<RedditPost[]> {
+  const res = await fetch(
+    `https://www.reddit.com/r/${subreddit}/${sort}.json?limit=25&t=day`,
+    { headers: { Accept: 'application/json' } }
+  );
+  if (!res.ok) throw new Error(`r/${subreddit}: ${res.status}`);
+  const json = await res.json();
+  return (json.data.children as RawRedditPost[]).map(normalizePost);
+}
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
 
 function formatLastUpdated(date: Date): string {
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -32,6 +101,8 @@ function formatCountdown(seconds: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
+// ── Component ─────────────────────────────────────────────────────────────────
+
 export default function NewsAggregator() {
   const [selectedSubreddit, setSelectedSubreddit] = useState<SubredditFilter>('all');
   const [sortType, setSortType] = useState<SortType>('hot');
@@ -41,8 +112,6 @@ export default function NewsAggregator() {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [refreshCountdown, setRefreshCountdown] = useState(AUTO_REFRESH_INTERVAL);
-
-  // Track post counts per subreddit for badges
   const [subredditCounts, setSubredditCounts] = useState<Record<string, number>>({});
 
   const autoRefreshRef = useRef(autoRefresh);
@@ -53,26 +122,50 @@ export default function NewsAggregator() {
     setError(null);
 
     try {
-      const params = new URLSearchParams({
-        subreddit: selectedSubreddit,
-        sort: sortType,
-        limit: '50',
-      });
-      const res = await fetch(`/api/reddit?${params.toString()}`);
-      if (!res.ok) throw new Error(`HTTP error ${res.status}`);
-      const data = await res.json();
+      const targets =
+        selectedSubreddit === 'all'
+          ? [...SUBREDDIT_NAMES]
+          : [selectedSubreddit];
 
-      if (data.posts) {
-        setPosts(data.posts);
+      // Fetch all subreddits in parallel directly from reddit.com (browser-side)
+      const results = await Promise.allSettled(
+        targets.map((sub) => fetchSubreddit(sub, sortType))
+      );
 
-        // Calculate per-subreddit counts
-        const counts: Record<string, number> = {};
-        for (const post of data.posts as RedditPost[]) {
-          counts[post.subreddit] = (counts[post.subreddit] ?? 0) + 1;
-        }
-        setSubredditCounts(counts);
+      const all: RedditPost[] = [];
+      const errors: string[] = [];
+
+      for (const r of results) {
+        if (r.status === 'fulfilled') all.push(...r.value);
+        else errors.push(r.reason instanceof Error ? r.reason.message : String(r.reason));
       }
 
+      if (all.length === 0 && errors.length > 0) {
+        throw new Error(errors.join(' | '));
+      }
+
+      // Deduplicate by id
+      const seen = new Set<string>();
+      const deduped = all.filter((p) => {
+        if (seen.has(p.id)) return false;
+        seen.add(p.id);
+        return true;
+      });
+
+      // Sort
+      if (sortType === 'new') {
+        deduped.sort((a, b) => b.createdAt - a.createdAt);
+      } else {
+        deduped.sort((a, b) => b.score - a.score);
+      }
+
+      setPosts(deduped);
+
+      const counts: Record<string, number> = {};
+      for (const post of deduped) {
+        counts[post.subreddit] = (counts[post.subreddit] ?? 0) + 1;
+      }
+      setSubredditCounts(counts);
       setLastUpdated(new Date());
       setRefreshCountdown(AUTO_REFRESH_INTERVAL);
     } catch (err) {
@@ -82,52 +175,34 @@ export default function NewsAggregator() {
     }
   }, [selectedSubreddit, sortType]);
 
-  // Initial fetch + re-fetch on filter changes
-  useEffect(() => {
-    fetchPosts();
-  }, [fetchPosts]);
+  useEffect(() => { fetchPosts(); }, [fetchPosts]);
 
-  // Auto-refresh interval
   useEffect(() => {
     const interval = setInterval(() => {
-      if (autoRefreshRef.current) {
-        fetchPosts();
-      }
+      if (autoRefreshRef.current) fetchPosts();
     }, AUTO_REFRESH_INTERVAL * 1000);
-
     return () => clearInterval(interval);
   }, [fetchPosts]);
 
-  // Countdown timer
   useEffect(() => {
-    if (!autoRefresh) {
-      setRefreshCountdown(AUTO_REFRESH_INTERVAL);
-      return;
-    }
-
+    if (!autoRefresh) { setRefreshCountdown(AUTO_REFRESH_INTERVAL); return; }
     const tick = setInterval(() => {
-      setRefreshCountdown((prev) => {
-        if (prev <= 1) return AUTO_REFRESH_INTERVAL;
-        return prev - 1;
-      });
+      setRefreshCountdown((prev) => (prev <= 1 ? AUTO_REFRESH_INTERVAL : prev - 1));
     }, 1000);
-
     return () => clearInterval(tick);
   }, [autoRefresh]);
 
-  const totalSubredditCount = (sub: SubredditFilter) => {
-    if (sub === 'all') return posts.length;
-    return subredditCounts[sub] ?? 0;
-  };
+  const totalSubredditCount = (sub: SubredditFilter) =>
+    sub === 'all' ? posts.length : (subredditCounts[sub] ?? 0);
 
-  const progressPercent = ((AUTO_REFRESH_INTERVAL - refreshCountdown) / AUTO_REFRESH_INTERVAL) * 100;
+  const progressPercent =
+    ((AUTO_REFRESH_INTERVAL - refreshCountdown) / AUTO_REFRESH_INTERVAL) * 100;
 
   return (
     <div className="min-h-screen bg-[#0a0a0f] text-[#e2e8f0]">
       {/* Sticky header */}
       <header className="sticky top-0 z-50 border-b border-[#1e1e2e] bg-[#0a0a0f]/90 backdrop-blur-md">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
-          {/* Top bar */}
           <div className="flex items-center justify-between py-3.5 gap-4">
             {/* Logo */}
             <div className="flex items-center gap-3 shrink-0">
@@ -138,7 +213,7 @@ export default function NewsAggregator() {
                 <h1 className="gradient-text text-lg font-black leading-none tracking-tight">
                   AI News
                 </h1>
-                  <p className="text-xs text-[#94a3b8] leading-none mt-0.5 hidden sm:block">
+                <p className="text-xs text-[#94a3b8] leading-none mt-0.5 hidden sm:block">
                   What AI community talks about today
                 </p>
               </div>
@@ -146,7 +221,6 @@ export default function NewsAggregator() {
 
             {/* Right controls */}
             <div className="flex items-center gap-3">
-              {/* Last updated */}
               {lastUpdated && (
                 <span className="hidden sm:flex items-center gap-1.5 text-xs text-[#4a5568]">
                   <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
@@ -154,7 +228,6 @@ export default function NewsAggregator() {
                 </span>
               )}
 
-              {/* Auto-refresh toggle */}
               <button
                 onClick={() => setAutoRefresh((v) => !v)}
                 className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium border transition-all duration-200 ${
@@ -184,7 +257,6 @@ export default function NewsAggregator() {
                 )}
               </button>
 
-              {/* Manual refresh */}
               <button
                 onClick={fetchPosts}
                 disabled={loading}
@@ -205,7 +277,6 @@ export default function NewsAggregator() {
             </div>
           </div>
 
-          {/* Auto-refresh progress bar */}
           {autoRefresh && (
             <div className="h-px bg-[#1e1e2e]">
               <div
@@ -221,7 +292,6 @@ export default function NewsAggregator() {
       <div className="sticky top-[calc(3.5rem+1px)] z-40 border-b border-[#1e1e2e] bg-[#0a0a0f]/95 backdrop-blur-md">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
           <div className="flex items-center gap-2 py-3 overflow-x-auto scrollbar-none">
-            {/* Subreddit tabs */}
             <div className="flex items-center gap-1.5 shrink-0">
               {SUBREDDITS.map((sub) => {
                 const count = totalSubredditCount(sub.value);
@@ -263,10 +333,8 @@ export default function NewsAggregator() {
               })}
             </div>
 
-            {/* Divider */}
             <div className="h-5 w-px bg-[#1e1e2e] mx-1 shrink-0" />
 
-            {/* Sort options */}
             <div className="flex items-center gap-1 shrink-0">
               {SORT_OPTIONS.map((opt) => {
                 const isActive = sortType === opt.value;
@@ -292,16 +360,13 @@ export default function NewsAggregator() {
 
       {/* Main content */}
       <main className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-6">
-        {/* Stats bar */}
         {!loading && !error && posts.length > 0 && (
           <div className="mb-5 flex items-center justify-between">
             <p className="text-sm text-[#94a3b8]">
               <span className="font-semibold text-[#e2e8f0]">{posts.length}</span>{' '}
               posts from{' '}
               <span className="font-semibold text-[#e2e8f0]">
-                {selectedSubreddit === 'all'
-                ? '5 subreddits'
-                : `r/${selectedSubreddit}`}
+                {selectedSubreddit === 'all' ? '5 subreddits' : `r/${selectedSubreddit}`}
               </span>
             </p>
             <div className="flex items-center gap-2 text-xs text-[#4a5568]">
@@ -311,7 +376,6 @@ export default function NewsAggregator() {
           </div>
         )}
 
-        {/* Error state */}
         {error && (
           <div className="flex flex-col items-center justify-center py-24 gap-4 text-center">
             <div className="h-16 w-16 rounded-2xl bg-red-500/10 border border-red-500/20 flex items-center justify-center text-3xl">
@@ -330,7 +394,6 @@ export default function NewsAggregator() {
           </div>
         )}
 
-        {/* Loading skeletons */}
         {loading && (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {Array.from({ length: 9 }).map((_, i) => (
@@ -339,7 +402,6 @@ export default function NewsAggregator() {
           </div>
         )}
 
-        {/* Post grid */}
         {!loading && !error && posts.length > 0 && (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {posts.map((post, index) => (
@@ -348,7 +410,6 @@ export default function NewsAggregator() {
           </div>
         )}
 
-        {/* Empty state */}
         {!loading && !error && posts.length === 0 && (
           <div className="flex flex-col items-center justify-center py-24 gap-4 text-center">
             <div className="h-16 w-16 rounded-2xl bg-[#111118] border border-[#1e1e2e] flex items-center justify-center text-3xl">
@@ -376,7 +437,7 @@ export default function NewsAggregator() {
           Data from Reddit · Not affiliated with Reddit ·{' '}
           <span className="gradient-text font-semibold">AI News Aggregator</span>
           {' '}·{' '}
-          <span className="font-mono text-[#2d2d3f] bg-[#1a1a2e] px-1.5 py-0.5 rounded text-[10px]">v2.1.0</span>
+          <span className="font-mono text-[#2d2d3f] bg-[#1a1a2e] px-1.5 py-0.5 rounded text-[10px]">v3.0.0</span>
         </p>
       </footer>
     </div>
