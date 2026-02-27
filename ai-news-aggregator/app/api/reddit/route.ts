@@ -3,84 +3,85 @@ import { RedditPost } from '@/app/types/reddit';
 
 const SUBREDDITS = ['artificial', 'ChatGPT', 'LocalLLaMA', 'singularity', 'OpenAI'] as const;
 
-// Use a browser-like User-Agent — Reddit returns 429 for generic server UAs
-// (e.g. "python-requests") but accepts Chrome-style UAs from any IP.
-const USER_AGENT =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+// Arctic Shift — real-time Reddit archive API, no auth required.
+// Docs: https://github.com/ArthurHeitmann/arctic_shift/tree/master/api
+const ARCTIC_BASE = 'https://arctic-shift.photon-reddit.com/api/posts/search';
+
+const DAYS_BACK = 7;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-interface RedditApiPost {
-  data: {
-    id: string;
-    title: string;
-    url: string;
-    permalink: string;
-    subreddit: string;
-    score: number;
-    num_comments: number;
-    author: string;
-    thumbnail: string;
-    selftext: string;
-    created_utc: number;
-    link_flair_text: string | null;
-    is_reddit_media_domain: boolean;
-    post_hint?: string;
-    preview?: {
-      images: Array<{
-        source: {
-          url: string;
-          width: number;
-          height: number;
-        };
-      }>;
-    };
+interface ArcticPost {
+  id: string;
+  title: string;
+  url: string;
+  permalink: string;
+  subreddit: string;
+  score: number;
+  num_comments: number;
+  author: string;
+  thumbnail?: string;
+  selftext?: string;
+  created_utc: number;
+  link_flair_text?: string | null;
+  is_reddit_media_domain?: boolean;
+  post_hint?: string;
+  preview?: {
+    images: Array<{
+      source: { url: string; width: number; height: number };
+    }>;
   };
 }
 
-interface RedditApiResponse {
-  data: {
-    children: RedditApiPost[];
-  };
+interface ArcticResponse {
+  data: ArcticPost[];
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function normalizePost(rawPost: RedditApiPost): RedditPost {
-  const d = rawPost.data;
-
+function normalizePost(raw: ArcticPost): RedditPost {
   let previewUrl: string | null = null;
-  if (d.preview?.images?.[0]?.source?.url) {
-    previewUrl = d.preview.images[0].source.url.replace(/&amp;/g, '&');
+  if (raw.preview?.images?.[0]?.source?.url) {
+    previewUrl = raw.preview.images[0].source.url.replace(/&amp;/g, '&');
   }
 
   const invalidThumbnails = ['self', 'default', 'nsfw', 'spoiler', '', 'image'];
   const thumbnail =
-    d.thumbnail && !invalidThumbnails.includes(d.thumbnail) && d.thumbnail.startsWith('http')
-      ? d.thumbnail
+    raw.thumbnail &&
+    !invalidThumbnails.includes(raw.thumbnail) &&
+    raw.thumbnail.startsWith('http')
+      ? raw.thumbnail
       : null;
 
   const isImage =
-    d.post_hint === 'image' ||
-    d.is_reddit_media_domain ||
-    /\.(jpg|jpeg|png|gif|webp)(\?.*)?$/i.test(d.url);
+    raw.post_hint === 'image' ||
+    !!raw.is_reddit_media_domain ||
+    /\.(jpg|jpeg|png|gif|webp)(\?.*)?$/i.test(raw.url);
 
   return {
-    id: d.id,
-    title: d.title,
-    url: d.url,
-    permalink: `https://www.reddit.com${d.permalink}`,
-    subreddit: d.subreddit,
-    score: d.score,
-    numComments: d.num_comments,
-    author: d.author,
+    id: raw.id,
+    title: raw.title,
+    url: raw.url,
+    permalink: `https://www.reddit.com${raw.permalink}`,
+    subreddit: raw.subreddit,
+    score: raw.score ?? 0,
+    numComments: raw.num_comments ?? 0,
+    author: raw.author ?? '',
     thumbnail,
-    selftext: d.selftext ? d.selftext.slice(0, 200) : '',
-    createdAt: d.created_utc,
-    flair: d.link_flair_text || null,
+    selftext: raw.selftext
+      ? raw.selftext.replace(/\[removed\]/g, '').trim().slice(0, 200)
+      : '',
+    createdAt: raw.created_utc,
+    flair: raw.link_flair_text ?? null,
     isImage,
     preview: previewUrl,
   };
+}
+
+function afterDate(): string {
+  const d = new Date();
+  d.setDate(d.getDate() - DAYS_BACK);
+  return d.toISOString().split('T')[0]; // YYYY-MM-DD
 }
 
 async function fetchSubreddit(
@@ -88,22 +89,33 @@ async function fetchSubreddit(
   sort: string,
   limit: number
 ): Promise<RedditPost[]> {
-  const url = `https://www.reddit.com/r/${subreddit}/${sort}.json?limit=${limit}&t=day`;
+  // Arctic Shift only sorts by created_utc.
+  // For hot/top: fetch more posts and re-sort by score client-side.
+  const fetchLimit = sort === 'new' ? limit : Math.min(limit * 4, 100);
 
-  const response = await fetch(url, {
-    headers: {
-      'User-Agent': USER_AGENT,
-      Accept: 'application/json',
-    },
+  const params = new URLSearchParams({
+    subreddit,
+    limit: String(fetchLimit),
+    sort: 'desc',
+    after: afterDate(),
+  });
+
+  const response = await fetch(`${ARCTIC_BASE}?${params}`, {
+    headers: { 'User-Agent': 'AINewsAggregator/3.0' },
     next: { revalidate: 60 },
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch r/${subreddit}: ${response.status}`);
+    throw new Error(`Arctic Shift fetch failed for r/${subreddit}: ${response.status}`);
   }
 
-  const json: RedditApiResponse = await response.json();
-  return json.data.children.map(normalizePost);
+  const json: ArcticResponse = await response.json();
+
+  if (!Array.isArray(json.data)) {
+    throw new Error(`Unexpected Arctic Shift response for r/${subreddit}`);
+  }
+
+  return json.data.map(normalizePost);
 }
 
 // ── Route handler ─────────────────────────────────────────────────────────────
