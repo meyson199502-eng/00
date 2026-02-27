@@ -458,7 +458,7 @@ export default function NewsAggregator() {
           Data from Reddit · Not affiliated with Reddit ·{' '}
           <span className="gradient-text font-semibold">AI News Aggregator</span>
           {' '}·{' '}
-          <span className="font-mono text-[#2d2d3f] bg-[#1a1a2e] px-1.5 py-0.5 rounded text-[10px]">v3.2.0</span>
+          <span className="font-mono text-[#2d2d3f] bg-[#1a1a2e] px-1.5 py-0.5 rounded text-[10px]">v3.3.0</span>
         </p>
       </footer>
     </div>
