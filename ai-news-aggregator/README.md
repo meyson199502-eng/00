@@ -1,5 +1,25 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## Environment Variables
+
+The app uses Reddit's OAuth2 API (Application-Only / client credentials flow).  
+You must create a Reddit app at <https://www.reddit.com/prefs/apps> (choose **script** type).
+
+| Variable | Required | Description |
+|---|---|---|
+| `REDDIT_CLIENT_ID` | yes | The "client id" shown under your app name |
+| `REDDIT_CLIENT_SECRET` | yes | The "secret" field of your app |
+| `REDDIT_USER_AGENT` | no | Custom User-Agent string (defaults to `web:ai-news-aggregator:v1.0`) |
+
+Create a `.env.local` file for local development:
+
+```
+REDDIT_CLIENT_ID=your_client_id_here
+REDDIT_CLIENT_SECRET=your_client_secret_here
+```
+
+On Vercel, add the same variables in **Project Settings → Environment Variables**.
+
 ## Getting Started
 
 First, run the development server:

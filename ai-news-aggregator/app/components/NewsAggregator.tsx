@@ -138,7 +138,7 @@ export default function NewsAggregator() {
                 <h1 className="gradient-text text-lg font-black leading-none tracking-tight">
                   AI News
                 </h1>
-                <p className="text-xs text-[#94a3b8] leading-none mt-0.5 hidden sm:block">
+                  <p className="text-xs text-[#94a3b8] leading-none mt-0.5 hidden sm:block">
                   What AI community talks about today
                 </p>
               </div>
@@ -299,7 +299,9 @@ export default function NewsAggregator() {
               <span className="font-semibold text-[#e2e8f0]">{posts.length}</span>{' '}
               posts from{' '}
               <span className="font-semibold text-[#e2e8f0]">
-                {selectedSubreddit === 'all' ? '5 subreddits' : `r/${selectedSubreddit}`}
+                {selectedSubreddit === 'all'
+                ? '5 subreddits'
+                : `r/${selectedSubreddit}`}
               </span>
             </p>
             <div className="flex items-center gap-2 text-xs text-[#4a5568]">
@@ -371,7 +373,7 @@ export default function NewsAggregator() {
       {/* Footer */}
       <footer className="border-t border-[#1e1e2e] mt-12 py-6 text-center">
         <p className="text-xs text-[#4a5568]">
-          Data from Reddit public API · Not affiliated with Reddit ·{' '}
+          Data from Reddit via PullPush API · Not affiliated with Reddit ·{' '}
           <span className="gradient-text font-semibold">AI News Aggregator</span>
         </p>
       </footer>

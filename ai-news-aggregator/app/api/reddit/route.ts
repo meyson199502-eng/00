@@ -2,79 +2,84 @@ import { NextRequest, NextResponse } from 'next/server';
 import { RedditPost } from '@/app/types/reddit';
 
 const SUBREDDITS = ['artificial', 'ChatGPT', 'LocalLLaMA', 'singularity', 'OpenAI'] as const;
-const USER_AGENT = 'AINewsAggregator/1.0';
 
-interface RedditApiPost {
-  data: {
-    id: string;
-    title: string;
-    url: string;
-    permalink: string;
-    subreddit: string;
-    score: number;
-    num_comments: number;
-    author: string;
-    thumbnail: string;
-    selftext: string;
-    created_utc: number;
-    link_flair_text: string | null;
-    is_reddit_media_domain: boolean;
-    post_hint?: string;
-    preview?: {
-      images: Array<{
-        source: {
-          url: string;
-          width: number;
-          height: number;
-        };
-      }>;
-    };
+// PullPush.io — open Reddit archive API, no auth required.
+// Docs: https://pullpush.io/
+const PULLPUSH_BASE = 'https://api.pullpush.io/reddit/search/submission/';
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+interface PullPushSubmission {
+  id: string;
+  title: string;
+  url: string;
+  permalink: string;
+  subreddit: string;
+  score: number;
+  num_comments: number;
+  author: string;
+  thumbnail?: string;
+  selftext?: string;
+  created_utc: number;
+  link_flair_text?: string | null;
+  is_reddit_media_domain?: boolean;
+  post_hint?: string;
+  preview?: {
+    images: Array<{
+      source: { url: string };
+    }>;
   };
 }
 
-interface RedditApiResponse {
-  data: {
-    children: RedditApiPost[];
-  };
+interface PullPushResponse {
+  data: PullPushSubmission[];
 }
 
-function normalizePost(rawPost: RedditApiPost): RedditPost {
-  const d = rawPost.data;
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
-  // Decode preview URL (Reddit escapes & as &amp; in JSON)
+function normalizePost(raw: PullPushSubmission): RedditPost {
   let previewUrl: string | null = null;
-  if (d.preview?.images?.[0]?.source?.url) {
-    previewUrl = d.preview.images[0].source.url.replace(/&amp;/g, '&');
+  if (raw.preview?.images?.[0]?.source?.url) {
+    previewUrl = raw.preview.images[0].source.url.replace(/&amp;/g, '&');
   }
 
-  // Filter out non-image thumbnails
   const invalidThumbnails = ['self', 'default', 'nsfw', 'spoiler', '', 'image'];
   const thumbnail =
-    d.thumbnail && !invalidThumbnails.includes(d.thumbnail) && d.thumbnail.startsWith('http')
-      ? d.thumbnail
+    raw.thumbnail &&
+    !invalidThumbnails.includes(raw.thumbnail) &&
+    raw.thumbnail.startsWith('http')
+      ? raw.thumbnail
       : null;
 
   const isImage =
-    d.post_hint === 'image' ||
-    d.is_reddit_media_domain ||
-    /\.(jpg|jpeg|png|gif|webp)(\?.*)?$/i.test(d.url);
+    raw.post_hint === 'image' ||
+    !!raw.is_reddit_media_domain ||
+    /\.(jpg|jpeg|png|gif|webp)(\?.*)?$/i.test(raw.url);
 
   return {
-    id: d.id,
-    title: d.title,
-    url: d.url,
-    permalink: `https://www.reddit.com${d.permalink}`,
-    subreddit: d.subreddit,
-    score: d.score,
-    numComments: d.num_comments,
-    author: d.author,
+    id: raw.id,
+    title: raw.title,
+    url: raw.url,
+    permalink: `https://www.reddit.com${raw.permalink}`,
+    subreddit: raw.subreddit,
+    score: raw.score ?? 0,
+    numComments: raw.num_comments ?? 0,
+    author: raw.author ?? '',
     thumbnail,
-    selftext: d.selftext ? d.selftext.slice(0, 200) : '',
-    createdAt: d.created_utc,
-    flair: d.link_flair_text || null,
+    selftext: raw.selftext ? raw.selftext.replace(/\[removed\]/g, '').trim().slice(0, 200) : '',
+    createdAt: raw.created_utc,
+    flair: raw.link_flair_text ?? null,
     isImage,
     preview: previewUrl,
   };
+}
+
+// Map sort type to PullPush sort_type parameter
+function toSortType(sort: string): string {
+  if (sort === 'new') return 'created_utc';
+  if (sort === 'top') return 'score';
+  // hot — no native equivalent, use score as proxy
+  return 'score';
 }
 
 async function fetchSubreddit(
@@ -82,22 +87,36 @@ async function fetchSubreddit(
   sort: string,
   limit: number
 ): Promise<RedditPost[]> {
-  const url = `https://www.reddit.com/r/${subreddit}/${sort}.json?limit=${limit}&t=day`;
+  const params = new URLSearchParams({
+    subreddit,
+    sort: 'desc',
+    sort_type: toSortType(sort),
+    size: String(limit),
+    // Restrict to posts from the last 7 days so results stay fresh
+    after: String(Math.floor(Date.now() / 1000) - 7 * 24 * 60 * 60),
+  });
+
+  const url = `${PULLPUSH_BASE}?${params}`;
 
   const response = await fetch(url, {
-    headers: {
-      'User-Agent': USER_AGENT,
-    },
-    next: { revalidate: 60 }, // cache for 60 seconds
+    headers: { 'User-Agent': 'AINewsAggregator/2.0' },
+    next: { revalidate: 60 },
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch r/${subreddit}: ${response.status}`);
+    throw new Error(`PullPush fetch failed for r/${subreddit}: ${response.status}`);
   }
 
-  const json: RedditApiResponse = await response.json();
-  return json.data.children.map(normalizePost);
+  const json: PullPushResponse = await response.json();
+
+  if (!Array.isArray(json.data)) {
+    throw new Error(`Unexpected PullPush response for r/${subreddit}`);
+  }
+
+  return json.data.map(normalizePost);
 }
+
+// ── Route handler ─────────────────────────────────────────────────────────────
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
@@ -106,7 +125,7 @@ export async function GET(request: NextRequest) {
   const limit = Math.min(parseInt(searchParams.get('limit') || '50', 10), 100);
 
   const validSorts = ['hot', 'new', 'top'];
-  const safeSsort = validSorts.includes(sort) ? sort : 'hot';
+  const safeSort = validSorts.includes(sort) ? sort : 'hot';
 
   let targetSubreddits: string[];
 
@@ -126,11 +145,11 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  const perSubredditLimit = subredditParam === 'all' ? Math.ceil(limit / targetSubreddits.length) : limit;
+  const perSubredditLimit =
+    subredditParam === 'all' ? Math.ceil(limit / targetSubreddits.length) : limit;
 
-  // Fetch all subreddits in parallel, handle partial failures gracefully
   const results = await Promise.allSettled(
-    targetSubreddits.map((sub) => fetchSubreddit(sub, safeSsort, perSubredditLimit))
+    targetSubreddits.map((sub) => fetchSubreddit(sub, safeSort, perSubredditLimit))
   );
 
   const posts: RedditPost[] = [];
@@ -153,12 +172,9 @@ export async function GET(request: NextRequest) {
   });
 
   // Sort merged results
-  if (safeSsort === 'new') {
+  if (safeSort === 'new') {
     dedupedPosts.sort((a, b) => b.createdAt - a.createdAt);
-  } else if (safeSsort === 'top') {
-    dedupedPosts.sort((a, b) => b.score - a.score);
   } else {
-    // hot: sort by score as a proxy
     dedupedPosts.sort((a, b) => b.score - a.score);
   }
 
@@ -167,7 +183,7 @@ export async function GET(request: NextRequest) {
     errors: errors.length > 0 ? errors : undefined,
     meta: {
       subreddits: targetSubreddits,
-      sort: safeSsort,
+      sort: safeSort,
       count: dedupedPosts.length,
     },
   });
