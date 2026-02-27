@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-export const runtime = 'edge';
-
 // Reddit blocks requests from cloud/server IPs when a generic User-Agent is used.
 // We use a realistic browser-like User-Agent to avoid 403 responses.
 const BROWSER_UA =
@@ -21,15 +19,18 @@ export async function GET(request: NextRequest) {
   const redditUrl = `https://www.reddit.com/r/${encodeURIComponent(subreddit)}/${encodeURIComponent(sort)}.json?limit=${limit}&t=${t}&raw_json=1`;
 
   try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+
     const res = await fetch(redditUrl, {
       headers: {
         'User-Agent': BROWSER_UA,
-        // Do NOT send Accept: application/json — it triggers a CORS preflight
-        // that Reddit rejects from server IPs. Reddit returns JSON by default
-        // for .json URLs regardless.
+        'Accept': 'application/json',
       },
-      cache: 'no-store',
+      signal: controller.signal,
     });
+
+    clearTimeout(timeoutId);
 
     if (!res.ok) {
       const body = await res.text().catch(() => '');
@@ -44,6 +45,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json(data, {
       headers: {
         'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=120',
+        'Access-Control-Allow-Origin': '*',
       },
     });
   } catch (err) {

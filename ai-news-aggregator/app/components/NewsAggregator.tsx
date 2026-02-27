@@ -80,22 +80,34 @@ function normalizePost(raw: RawRedditPost): RedditPost {
 }
 
 async function fetchSubreddit(subreddit: string, sort: SortType): Promise<RedditPost[]> {
-  // First try our server-side API proxy route.
-  // If Reddit blocks the server IP (403), fall back to the Next.js rewrite proxy
-  // which forwards the request from the user's browser IP.
   const params = new URLSearchParams({ subreddit, sort, limit: '25', t: 'day' });
 
-  let res = await fetch(`/api/reddit?${params}`);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
 
-  if (res.status === 403) {
-    // Fallback: use Next.js rewrite proxy — request goes from browser IP
-    const rewriteUrl = `/reddit-proxy/r/${encodeURIComponent(subreddit)}/${encodeURIComponent(sort)}.json?limit=25&t=${sort === 'top' ? 'day' : 'all'}&raw_json=1`;
-    res = await fetch(rewriteUrl);
+  try {
+    // Primary: server-side proxy (avoids CORS, sends proper User-Agent)
+    const res = await fetch(`/api/reddit?${params}`, {
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error(errBody?.error ?? `r/${subreddit}: HTTP ${res.status}`);
+    }
+
+    const json = await res.json();
+    if (!json?.data?.children) {
+      throw new Error(`r/${subreddit}: unexpected response format`);
+    }
+    return (json.data.children as RawRedditPost[]).map(normalizePost);
+  } catch (err) {
+    clearTimeout(timeoutId);
+    throw err;
   }
-
-  if (!res.ok) throw new Error(`r/${subreddit}: ${res.status}`);
-  const json = await res.json();
-  return (json.data.children as RawRedditPost[]).map(normalizePost);
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
