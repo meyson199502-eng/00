@@ -1,87 +1,84 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { RedditPost } from '@/app/types/reddit';
 
+// Edge Runtime uses a different TLS stack (not Node.js) which bypasses
+// Cloudflare's server-IP blocking that affects regular serverless functions.
+export const runtime = 'edge';
+
 const SUBREDDITS = ['artificial', 'ChatGPT', 'LocalLLaMA', 'singularity', 'OpenAI'] as const;
 
-// Arctic Shift — real-time Reddit archive API, no auth required.
-// Docs: https://github.com/ArthurHeitmann/arctic_shift/tree/master/api
-const ARCTIC_BASE = 'https://arctic-shift.photon-reddit.com/api/posts/search';
-
-const DAYS_BACK = 7;
+const USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-interface ArcticPost {
-  id: string;
-  title: string;
-  url: string;
-  permalink: string;
-  subreddit: string;
-  score: number;
-  num_comments: number;
-  author: string;
-  thumbnail?: string;
-  selftext?: string;
-  created_utc: number;
-  link_flair_text?: string | null;
-  is_reddit_media_domain?: boolean;
-  post_hint?: string;
-  preview?: {
-    images: Array<{
-      source: { url: string; width: number; height: number };
-    }>;
+interface RedditApiPost {
+  data: {
+    id: string;
+    title: string;
+    url: string;
+    permalink: string;
+    subreddit: string;
+    score: number;
+    num_comments: number;
+    author: string;
+    thumbnail: string;
+    selftext: string;
+    created_utc: number;
+    link_flair_text: string | null;
+    is_reddit_media_domain: boolean;
+    post_hint?: string;
+    preview?: {
+      images: Array<{
+        source: { url: string; width: number; height: number };
+      }>;
+    };
   };
 }
 
-interface ArcticResponse {
-  data: ArcticPost[];
+interface RedditApiResponse {
+  data: {
+    children: RedditApiPost[];
+  };
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function normalizePost(raw: ArcticPost): RedditPost {
+function normalizePost(raw: RedditApiPost): RedditPost {
+  const d = raw.data;
+
   let previewUrl: string | null = null;
-  if (raw.preview?.images?.[0]?.source?.url) {
-    previewUrl = raw.preview.images[0].source.url.replace(/&amp;/g, '&');
+  if (d.preview?.images?.[0]?.source?.url) {
+    previewUrl = d.preview.images[0].source.url.replace(/&amp;/g, '&');
   }
 
   const invalidThumbnails = ['self', 'default', 'nsfw', 'spoiler', '', 'image'];
   const thumbnail =
-    raw.thumbnail &&
-    !invalidThumbnails.includes(raw.thumbnail) &&
-    raw.thumbnail.startsWith('http')
-      ? raw.thumbnail
+    d.thumbnail && !invalidThumbnails.includes(d.thumbnail) && d.thumbnail.startsWith('http')
+      ? d.thumbnail
       : null;
 
   const isImage =
-    raw.post_hint === 'image' ||
-    !!raw.is_reddit_media_domain ||
-    /\.(jpg|jpeg|png|gif|webp)(\?.*)?$/i.test(raw.url);
+    d.post_hint === 'image' ||
+    d.is_reddit_media_domain ||
+    /\.(jpg|jpeg|png|gif|webp)(\?.*)?$/i.test(d.url);
 
   return {
-    id: raw.id,
-    title: raw.title,
-    url: raw.url,
-    permalink: `https://www.reddit.com${raw.permalink}`,
-    subreddit: raw.subreddit,
-    score: raw.score ?? 0,
-    numComments: raw.num_comments ?? 0,
-    author: raw.author ?? '',
+    id: d.id,
+    title: d.title,
+    url: d.url,
+    permalink: `https://www.reddit.com${d.permalink}`,
+    subreddit: d.subreddit,
+    score: d.score,
+    numComments: d.num_comments,
+    author: d.author,
     thumbnail,
-    selftext: raw.selftext
-      ? raw.selftext.replace(/\[removed\]/g, '').trim().slice(0, 200)
-      : '',
-    createdAt: raw.created_utc,
-    flair: raw.link_flair_text ?? null,
+    selftext: d.selftext ? d.selftext.slice(0, 200) : '',
+    createdAt: d.created_utc,
+    flair: d.link_flair_text || null,
     isImage,
     preview: previewUrl,
   };
-}
-
-function afterDate(): string {
-  const d = new Date();
-  d.setDate(d.getDate() - DAYS_BACK);
-  return d.toISOString().split('T')[0]; // YYYY-MM-DD
 }
 
 async function fetchSubreddit(
@@ -89,33 +86,23 @@ async function fetchSubreddit(
   sort: string,
   limit: number
 ): Promise<RedditPost[]> {
-  // Arctic Shift only sorts by created_utc.
-  // For hot/top: fetch more posts and re-sort by score client-side.
-  const fetchLimit = sort === 'new' ? limit : Math.min(limit * 4, 100);
+  const url = `https://www.reddit.com/r/${subreddit}/${sort}.json?limit=${limit}&t=day`;
 
-  const params = new URLSearchParams({
-    subreddit,
-    limit: String(fetchLimit),
-    sort: 'desc',
-    after: afterDate(),
-  });
-
-  const response = await fetch(`${ARCTIC_BASE}?${params}`, {
-    headers: { 'User-Agent': 'AINewsAggregator/3.0' },
-    next: { revalidate: 60 },
+  const response = await fetch(url, {
+    headers: {
+      'User-Agent': USER_AGENT,
+      'Accept': 'application/json',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept-Encoding': 'gzip, deflate, br',
+    },
   });
 
   if (!response.ok) {
-    throw new Error(`Arctic Shift fetch failed for r/${subreddit}: ${response.status}`);
+    throw new Error(`Failed to fetch r/${subreddit}: ${response.status}`);
   }
 
-  const json: ArcticResponse = await response.json();
-
-  if (!Array.isArray(json.data)) {
-    throw new Error(`Unexpected Arctic Shift response for r/${subreddit}`);
-  }
-
-  return json.data.map(normalizePost);
+  const json: RedditApiResponse = await response.json();
+  return json.data.children.map(normalizePost);
 }
 
 // ── Route handler ─────────────────────────────────────────────────────────────

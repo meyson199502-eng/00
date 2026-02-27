@@ -373,10 +373,10 @@ export default function NewsAggregator() {
       {/* Footer */}
       <footer className="border-t border-[#1e1e2e] mt-12 py-6 text-center">
         <p className="text-xs text-[#4a5568]">
-          Data via Arctic Shift · Not affiliated with Reddit ·{' '}
+          Data from Reddit · Not affiliated with Reddit ·{' '}
           <span className="gradient-text font-semibold">AI News Aggregator</span>
           {' '}·{' '}
-          <span className="font-mono text-[#2d2d3f] bg-[#1a1a2e] px-1.5 py-0.5 rounded text-[10px]">v2.0.0</span>
+          <span className="font-mono text-[#2d2d3f] bg-[#1a1a2e] px-1.5 py-0.5 rounded text-[10px]">v2.1.0</span>
         </p>
       </footer>
     </div>
