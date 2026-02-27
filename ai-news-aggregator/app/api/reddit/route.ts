@@ -3,83 +3,84 @@ import { RedditPost } from '@/app/types/reddit';
 
 const SUBREDDITS = ['artificial', 'ChatGPT', 'LocalLLaMA', 'singularity', 'OpenAI'] as const;
 
-// PullPush.io — open Reddit archive API, no auth required.
-// Docs: https://pullpush.io/
-const PULLPUSH_BASE = 'https://api.pullpush.io/reddit/search/submission/';
+// Use a browser-like User-Agent — Reddit returns 429 for generic server UAs
+// (e.g. "python-requests") but accepts Chrome-style UAs from any IP.
+const USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-interface PullPushSubmission {
-  id: string;
-  title: string;
-  url: string;
-  permalink: string;
-  subreddit: string;
-  score: number;
-  num_comments: number;
-  author: string;
-  thumbnail?: string;
-  selftext?: string;
-  created_utc: number;
-  link_flair_text?: string | null;
-  is_reddit_media_domain?: boolean;
-  post_hint?: string;
-  preview?: {
-    images: Array<{
-      source: { url: string };
-    }>;
+interface RedditApiPost {
+  data: {
+    id: string;
+    title: string;
+    url: string;
+    permalink: string;
+    subreddit: string;
+    score: number;
+    num_comments: number;
+    author: string;
+    thumbnail: string;
+    selftext: string;
+    created_utc: number;
+    link_flair_text: string | null;
+    is_reddit_media_domain: boolean;
+    post_hint?: string;
+    preview?: {
+      images: Array<{
+        source: {
+          url: string;
+          width: number;
+          height: number;
+        };
+      }>;
+    };
   };
 }
 
-interface PullPushResponse {
-  data: PullPushSubmission[];
+interface RedditApiResponse {
+  data: {
+    children: RedditApiPost[];
+  };
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function normalizePost(raw: PullPushSubmission): RedditPost {
+function normalizePost(rawPost: RedditApiPost): RedditPost {
+  const d = rawPost.data;
+
   let previewUrl: string | null = null;
-  if (raw.preview?.images?.[0]?.source?.url) {
-    previewUrl = raw.preview.images[0].source.url.replace(/&amp;/g, '&');
+  if (d.preview?.images?.[0]?.source?.url) {
+    previewUrl = d.preview.images[0].source.url.replace(/&amp;/g, '&');
   }
 
   const invalidThumbnails = ['self', 'default', 'nsfw', 'spoiler', '', 'image'];
   const thumbnail =
-    raw.thumbnail &&
-    !invalidThumbnails.includes(raw.thumbnail) &&
-    raw.thumbnail.startsWith('http')
-      ? raw.thumbnail
+    d.thumbnail && !invalidThumbnails.includes(d.thumbnail) && d.thumbnail.startsWith('http')
+      ? d.thumbnail
       : null;
 
   const isImage =
-    raw.post_hint === 'image' ||
-    !!raw.is_reddit_media_domain ||
-    /\.(jpg|jpeg|png|gif|webp)(\?.*)?$/i.test(raw.url);
+    d.post_hint === 'image' ||
+    d.is_reddit_media_domain ||
+    /\.(jpg|jpeg|png|gif|webp)(\?.*)?$/i.test(d.url);
 
   return {
-    id: raw.id,
-    title: raw.title,
-    url: raw.url,
-    permalink: `https://www.reddit.com${raw.permalink}`,
-    subreddit: raw.subreddit,
-    score: raw.score ?? 0,
-    numComments: raw.num_comments ?? 0,
-    author: raw.author ?? '',
+    id: d.id,
+    title: d.title,
+    url: d.url,
+    permalink: `https://www.reddit.com${d.permalink}`,
+    subreddit: d.subreddit,
+    score: d.score,
+    numComments: d.num_comments,
+    author: d.author,
     thumbnail,
-    selftext: raw.selftext ? raw.selftext.replace(/\[removed\]/g, '').trim().slice(0, 200) : '',
-    createdAt: raw.created_utc,
-    flair: raw.link_flair_text ?? null,
+    selftext: d.selftext ? d.selftext.slice(0, 200) : '',
+    createdAt: d.created_utc,
+    flair: d.link_flair_text || null,
     isImage,
     preview: previewUrl,
   };
-}
-
-// Map sort type to PullPush sort_type parameter
-function toSortType(sort: string): string {
-  if (sort === 'new') return 'created_utc';
-  if (sort === 'top') return 'score';
-  // hot — no native equivalent, use score as proxy
-  return 'score';
 }
 
 async function fetchSubreddit(
@@ -87,33 +88,22 @@ async function fetchSubreddit(
   sort: string,
   limit: number
 ): Promise<RedditPost[]> {
-  const params = new URLSearchParams({
-    subreddit,
-    sort: 'desc',
-    sort_type: toSortType(sort),
-    size: String(limit),
-    // Restrict to posts from the last 7 days so results stay fresh
-    after: String(Math.floor(Date.now() / 1000) - 7 * 24 * 60 * 60),
-  });
-
-  const url = `${PULLPUSH_BASE}?${params}`;
+  const url = `https://www.reddit.com/r/${subreddit}/${sort}.json?limit=${limit}&t=day`;
 
   const response = await fetch(url, {
-    headers: { 'User-Agent': 'AINewsAggregator/2.0' },
+    headers: {
+      'User-Agent': USER_AGENT,
+      Accept: 'application/json',
+    },
     next: { revalidate: 60 },
   });
 
   if (!response.ok) {
-    throw new Error(`PullPush fetch failed for r/${subreddit}: ${response.status}`);
+    throw new Error(`Failed to fetch r/${subreddit}: ${response.status}`);
   }
 
-  const json: PullPushResponse = await response.json();
-
-  if (!Array.isArray(json.data)) {
-    throw new Error(`Unexpected PullPush response for r/${subreddit}`);
-  }
-
-  return json.data.map(normalizePost);
+  const json: RedditApiResponse = await response.json();
+  return json.data.children.map(normalizePost);
 }
 
 // ── Route handler ─────────────────────────────────────────────────────────────
