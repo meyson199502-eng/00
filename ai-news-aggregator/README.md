@@ -1,56 +1,83 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# AI News Aggregator
 
-## Environment Variables
+A Next.js app that aggregates posts from AI-related subreddits (r/artificial, r/ChatGPT, r/LocalLLaMA, r/singularity, r/OpenAI).
 
-The app uses Reddit's OAuth2 API (Application-Only / client credentials flow).  
-You must create a Reddit app at <https://www.reddit.com/prefs/apps> (choose **script** type).
+## ⚙️ Setup: Reddit API Credentials (required)
 
-| Variable | Required | Description |
-|---|---|---|
-| `REDDIT_CLIENT_ID` | yes | The "client id" shown under your app name |
-| `REDDIT_CLIENT_SECRET` | yes | The "secret" field of your app |
-| `REDDIT_USER_AGENT` | no | Custom User-Agent string (defaults to `web:ai-news-aggregator:v1.0`) |
+Reddit blocks anonymous requests from cloud/server IPs with 403 errors.  
+The app uses Reddit's **OAuth2 client credentials** flow which works from any IP.
 
-Create a `.env.local` file for local development:
+### Step 1 — Create a free Reddit app (~2 minutes)
 
+1. Log in to Reddit and go to: **<https://www.reddit.com/prefs/apps>**
+2. Scroll down and click **"create another app"**
+3. Fill in the form:
+   - **Name:** `ai-news-aggregator` (or anything)
+   - **App type:** `script` ← **important**
+   - **Redirect URI:** `http://localhost:3000`
+4. Click **"create app"**
+5. Note the two values:
+   - Short string **under the app name** → `REDDIT_CLIENT_ID`
+   - **"secret"** field → `REDDIT_CLIENT_SECRET`
+
+### Step 2 — Add credentials to `.env.local`
+
+```bash
+cp .env.local.example .env.local
+# then edit .env.local and fill in your values
 ```
+
+```env
 REDDIT_CLIENT_ID=your_client_id_here
 REDDIT_CLIENT_SECRET=your_client_secret_here
 ```
 
-On Vercel, add the same variables in **Project Settings → Environment Variables**.
+### Step 3 — Deploy to Vercel
+
+Add the same two variables in **Vercel → Project Settings → Environment Variables**.
+
+---
+
+## Environment Variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `REDDIT_CLIENT_ID` | ✅ yes | The short string shown under your app name on reddit.com/prefs/apps |
+| `REDDIT_CLIENT_SECRET` | ✅ yes | The "secret" field of your Reddit app |
+
+---
 
 ## Getting Started
 
-First, run the development server:
-
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000) in your browser.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+---
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## How it works
 
-## Learn More
+```
+Browser → /api/reddit?subreddit=ChatGPT
+           ↓
+        Next.js API route (Node runtime)
+           ↓
+        POST reddit.com/api/v1/access_token  (Basic auth with client_id:secret)
+           ↓  token cached in-process for 1 hour
+        GET oauth.reddit.com/r/ChatGPT/hot.json  (Bearer token)
+           ↓
+        JSON posts returned to browser
+```
 
-To learn more about Next.js, take a look at the following resources:
+Reddit's `oauth.reddit.com` endpoint is not IP-blocked — it works from Vercel, AWS, and any other cloud provider.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+---
 
 ## Deploy on Vercel
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new)
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Remember to add `REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET` in your Vercel project settings.
