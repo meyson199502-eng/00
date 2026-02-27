@@ -3,6 +3,7 @@ export interface RedditPost {
   title: string;
   url: string;
   permalink: string;
+  /** HN category key (ai | chatgpt | localai | singularity | openai) */
   subreddit: string;
   score: number;
   numComments: number;
@@ -16,4 +17,4 @@ export interface RedditPost {
 }
 
 export type SortType = 'hot' | 'new' | 'top';
-export type SubredditFilter = 'all' | 'artificial' | 'ChatGPT' | 'LocalLLaMA' | 'singularity' | 'OpenAI';
+export type SubredditFilter = 'all' | 'ai' | 'chatgpt' | 'localai' | 'singularity' | 'openai';

@@ -1,165 +1,100 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { RedditPost } from '@/app/types/reddit';
 
-const SUBREDDITS = ['artificial', 'ChatGPT', 'LocalLLaMA', 'singularity', 'OpenAI'] as const;
+// ── Hacker News topic configuration ──────────────────────────────────────────
+// We map the legacy "subreddit" concept to HN search queries / tags.
+// The "source" field in RedditPost is set to the category key.
 
-// Reddit OAuth2 Application-Only (client credentials) flow.
-// Required env vars: REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET
-// Optional: REDDIT_USER_AGENT (defaults to a reasonable value)
-const CLIENT_ID = process.env.REDDIT_CLIENT_ID ?? '';
-const CLIENT_SECRET = process.env.REDDIT_CLIENT_SECRET ?? '';
-const USER_AGENT =
-  process.env.REDDIT_USER_AGENT ?? 'web:ai-news-aggregator:v1.0 (by /u/your_reddit_username)';
+const CATEGORIES = {
+  ai: { label: 'AI', query: 'artificial intelligence OR machine learning OR LLM OR GPT OR Claude' },
+  chatgpt: { label: 'ChatGPT', query: 'ChatGPT OR GPT-4 OR OpenAI chat' },
+  localai: { label: 'Local AI', query: 'local LLM OR llama OR mistral OR ollama OR open-source LLM' },
+  singularity: { label: 'Singularity', query: 'AGI OR singularity OR superintelligence' },
+  openai: { label: 'OpenAI', query: 'OpenAI OR GPT OR DALL-E OR Sora' },
+} as const;
 
-// ── Token cache (module-level, survives warm serverless invocations) ──────────
-let cachedToken: string | null = null;
-let tokenExpiresAt = 0; // Unix ms
+type CategoryKey = keyof typeof CATEGORIES;
+const CATEGORY_KEYS = Object.keys(CATEGORIES) as CategoryKey[];
 
-async function getAccessToken(): Promise<string> {
-  const now = Date.now();
-  // Refresh 60 s before actual expiry to avoid edge-case races
-  if (cachedToken && now < tokenExpiresAt - 60_000) {
-    return cachedToken;
-  }
+// ── Algolia HN API types ──────────────────────────────────────────────────────
 
-  if (!CLIENT_ID || !CLIENT_SECRET) {
-    throw new Error(
-      'Reddit OAuth credentials are not configured. ' +
-        'Set REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET environment variables.'
-    );
-  }
-
-  const credentials = Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64');
-
-  const res = await fetch('https://www.reddit.com/api/v1/access_token', {
-    method: 'POST',
-    headers: {
-      Authorization: `Basic ${credentials}`,
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'User-Agent': USER_AGENT,
-    },
-    body: 'grant_type=client_credentials',
-    // Do NOT use Next.js cache here — we manage the token cache ourselves
-    cache: 'no-store',
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to obtain Reddit access token (${res.status}): ${text}`);
-  }
-
-  const data = (await res.json()) as { access_token: string; expires_in: number };
-  cachedToken = data.access_token;
-  tokenExpiresAt = now + data.expires_in * 1_000;
-  return cachedToken;
+interface HNHit {
+  objectID: string;
+  title: string;
+  url?: string;
+  story_text?: string;
+  author: string;
+  points: number;
+  num_comments: number;
+  created_at_i: number; // unix seconds
+  _tags: string[];
 }
 
-// ── Types ─────────────────────────────────────────────────────────────────────
-
-interface RedditApiPost {
-  data: {
-    id: string;
-    title: string;
-    url: string;
-    permalink: string;
-    subreddit: string;
-    score: number;
-    num_comments: number;
-    author: string;
-    thumbnail: string;
-    selftext: string;
-    created_utc: number;
-    link_flair_text: string | null;
-    is_reddit_media_domain: boolean;
-    post_hint?: string;
-    preview?: {
-      images: Array<{
-        source: {
-          url: string;
-          width: number;
-          height: number;
-        };
-      }>;
-    };
-  };
-}
-
-interface RedditApiResponse {
-  data: {
-    children: RedditApiPost[];
-  };
+interface HNSearchResponse {
+  hits: HNHit[];
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function normalizePost(rawPost: RedditApiPost): RedditPost {
-  const d = rawPost.data;
-
-  // Decode preview URL (Reddit escapes & as &amp; in JSON)
-  let previewUrl: string | null = null;
-  if (d.preview?.images?.[0]?.source?.url) {
-    previewUrl = d.preview.images[0].source.url.replace(/&amp;/g, '&');
-  }
-
-  // Filter out non-image thumbnails
-  const invalidThumbnails = ['self', 'default', 'nsfw', 'spoiler', '', 'image'];
-  const thumbnail =
-    d.thumbnail && !invalidThumbnails.includes(d.thumbnail) && d.thumbnail.startsWith('http')
-      ? d.thumbnail
-      : null;
-
-  const isImage =
-    d.post_hint === 'image' ||
-    d.is_reddit_media_domain ||
-    /\.(jpg|jpeg|png|gif|webp)(\?.*)?$/i.test(d.url);
+function normalizeHit(hit: HNHit, category: CategoryKey): RedditPost {
+  const storyUrl = hit.url ?? `https://news.ycombinator.com/item?id=${hit.objectID}`;
 
   return {
-    id: d.id,
-    title: d.title,
-    url: d.url,
-    permalink: `https://www.reddit.com${d.permalink}`,
-    subreddit: d.subreddit,
-    score: d.score,
-    numComments: d.num_comments,
-    author: d.author,
-    thumbnail,
-    selftext: d.selftext ? d.selftext.slice(0, 200) : '',
-    createdAt: d.created_utc,
-    flair: d.link_flair_text || null,
-    isImage,
-    preview: previewUrl,
+    id: hit.objectID,
+    title: hit.title ?? '(no title)',
+    url: storyUrl,
+    permalink: `https://news.ycombinator.com/item?id=${hit.objectID}`,
+    subreddit: category,
+    score: hit.points ?? 0,
+    numComments: hit.num_comments ?? 0,
+    author: hit.author ?? '',
+    thumbnail: null,
+    selftext: hit.story_text ? hit.story_text.replace(/<[^>]+>/g, '').slice(0, 200) : '',
+    createdAt: hit.created_at_i,
+    flair: CATEGORIES[category].label,
+    isImage: false,
+    preview: null,
   };
 }
 
-async function fetchSubreddit(
-  subreddit: string,
+async function fetchCategory(
+  category: CategoryKey,
   sort: string,
-  limit: number,
-  token: string
+  limit: number
 ): Promise<RedditPost[]> {
-  const url = `https://oauth.reddit.com/r/${subreddit}/${sort}.json?limit=${limit}&t=day`;
+  const { query } = CATEGORIES[category];
+
+  // Algolia HN has two endpoints:
+  //   /search       → relevance + points (best for "hot" / "top")
+  //   /search_by_date → newest first (best for "new")
+  const endpoint = sort === 'new' ? 'search_by_date' : 'search';
+
+  const params = new URLSearchParams({
+    query,
+    tags: 'story',
+    hitsPerPage: String(limit),
+  });
+
+  const url = `https://hn.algolia.com/api/v1/${endpoint}?${params}`;
 
   const response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'User-Agent': USER_AGENT,
-    },
-    // Cache at the Next.js layer for 60 seconds
+    headers: { 'User-Agent': 'AINewsAggregator/2.0' },
     next: { revalidate: 60 },
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch r/${subreddit}: ${response.status}`);
+    throw new Error(`HN Algolia fetch failed for category "${category}": ${response.status}`);
   }
 
-  const json: RedditApiResponse = await response.json();
-  return json.data.children.map(normalizePost);
+  const json: HNSearchResponse = await response.json();
+  return json.hits.map((hit) => normalizeHit(hit, category));
 }
 
 // ── Route handler ─────────────────────────────────────────────────────────────
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
+  // "subreddit" param kept for API compatibility with the client
   const subredditParam = searchParams.get('subreddit') || 'all';
   const sort = searchParams.get('sort') || 'hot';
   const limit = Math.min(parseInt(searchParams.get('limit') || '50', 10), 100);
@@ -167,39 +102,29 @@ export async function GET(request: NextRequest) {
   const validSorts = ['hot', 'new', 'top'];
   const safeSort = validSorts.includes(sort) ? sort : 'hot';
 
-  let targetSubreddits: string[];
+  let targetCategories: CategoryKey[];
 
   if (subredditParam === 'all') {
-    targetSubreddits = [...SUBREDDITS];
+    targetCategories = [...CATEGORY_KEYS];
   } else {
-    targetSubreddits = subredditParam
+    targetCategories = subredditParam
       .split(',')
       .map((s) => s.trim())
-      .filter((s) => SUBREDDITS.includes(s as (typeof SUBREDDITS)[number]));
+      .filter((s): s is CategoryKey => CATEGORY_KEYS.includes(s as CategoryKey));
 
-    if (targetSubreddits.length === 0) {
+    if (targetCategories.length === 0) {
       return NextResponse.json(
-        { error: 'Invalid subreddit(s) specified', posts: [] },
+        { error: 'Invalid category specified', posts: [] },
         { status: 400 }
       );
     }
   }
 
-  // Obtain OAuth token (cached between warm invocations)
-  let token: string;
-  try {
-    token = await getAccessToken();
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: message, posts: [] }, { status: 500 });
-  }
+  const perCategoryLimit =
+    subredditParam === 'all' ? Math.ceil(limit / targetCategories.length) : limit;
 
-  const perSubredditLimit =
-    subredditParam === 'all' ? Math.ceil(limit / targetSubreddits.length) : limit;
-
-  // Fetch all subreddits in parallel, handle partial failures gracefully
   const results = await Promise.allSettled(
-    targetSubreddits.map((sub) => fetchSubreddit(sub, safeSort, perSubredditLimit, token))
+    targetCategories.map((cat) => fetchCategory(cat, safeSort, perCategoryLimit))
   );
 
   const posts: RedditPost[] = [];
@@ -213,7 +138,7 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  // Deduplicate by id
+  // Deduplicate by id (same story can match multiple queries)
   const seen = new Set<string>();
   const dedupedPosts = posts.filter((p) => {
     if (seen.has(p.id)) return false;
@@ -225,7 +150,6 @@ export async function GET(request: NextRequest) {
   if (safeSort === 'new') {
     dedupedPosts.sort((a, b) => b.createdAt - a.createdAt);
   } else {
-    // hot & top: sort by score
     dedupedPosts.sort((a, b) => b.score - a.score);
   }
 
@@ -233,7 +157,7 @@ export async function GET(request: NextRequest) {
     posts: dedupedPosts.slice(0, limit),
     errors: errors.length > 0 ? errors : undefined,
     meta: {
-      subreddits: targetSubreddits,
+      subreddits: targetCategories,
       sort: safeSort,
       count: dedupedPosts.length,
     },
