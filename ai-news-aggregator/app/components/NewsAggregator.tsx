@@ -80,12 +80,11 @@ function normalizePost(raw: RawRedditPost): RedditPost {
 }
 
 async function fetchSubreddit(subreddit: string, sort: SortType): Promise<RedditPost[]> {
-  // Fetch via same-origin rewrite (/reddit-api → reddit.com).
-  // Vercel forwards the request server-side without Origin header,
+  // Call our own server-side API route which proxies to Reddit.
+  // Running on the server means no Origin header is sent to Reddit,
   // so Reddit returns 200 with no CORS issues.
-  const res = await fetch(
-    `/reddit-api/r/${subreddit}/${sort}.json?limit=25&t=day`
-  );
+  const params = new URLSearchParams({ subreddit, sort, limit: '25', t: 'day' });
+  const res = await fetch(`/api/reddit?${params}`);
   if (!res.ok) throw new Error(`r/${subreddit}: ${res.status}`);
   const json = await res.json();
   return (json.data.children as RawRedditPost[]).map(normalizePost);
