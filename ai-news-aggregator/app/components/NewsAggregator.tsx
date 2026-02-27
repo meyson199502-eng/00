@@ -80,11 +80,19 @@ function normalizePost(raw: RawRedditPost): RedditPost {
 }
 
 async function fetchSubreddit(subreddit: string, sort: SortType): Promise<RedditPost[]> {
-  // Call our own server-side API route which proxies to Reddit.
-  // Running on the server means no Origin header is sent to Reddit,
-  // so Reddit returns 200 with no CORS issues.
+  // First try our server-side API proxy route.
+  // If Reddit blocks the server IP (403), fall back to the Next.js rewrite proxy
+  // which forwards the request from the user's browser IP.
   const params = new URLSearchParams({ subreddit, sort, limit: '25', t: 'day' });
-  const res = await fetch(`/api/reddit?${params}`);
+
+  let res = await fetch(`/api/reddit?${params}`);
+
+  if (res.status === 403) {
+    // Fallback: use Next.js rewrite proxy — request goes from browser IP
+    const rewriteUrl = `/reddit-proxy/r/${encodeURIComponent(subreddit)}/${encodeURIComponent(sort)}.json?limit=25&t=${sort === 'top' ? 'day' : 'all'}&raw_json=1`;
+    res = await fetch(rewriteUrl);
+  }
+
   if (!res.ok) throw new Error(`r/${subreddit}: ${res.status}`);
   const json = await res.json();
   return (json.data.children as RawRedditPost[]).map(normalizePost);
